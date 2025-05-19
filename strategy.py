@@ -2,47 +2,48 @@ import pandas as pd
 
 def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame) -> pd.DataFrame:
     """
-    Strategy: Buy LDO if BTC or ETH pumped >2% exactly 4 hours ago.
-
-    Inputs:
-    - candles_target: OHLCV for LDO (1H)
-    - candles_anchor: OHLCV for anchors with columns like 'close_BTC_1H', 'close_ETH_1H'
-
-    Output:
-    - DataFrame with ['timestamp', 'signal']
+    Strategy:
+    BUY LDO if BTC or ETH pumped >2% in any of the past 4 hours.
+    SELL LDO if LDO dropped >1.5% in last hour AND both BTC & ETH dropped in last 2 hours.
+    HOLD otherwise.
     """
+
     try:
-        # Identify actual close column names from candles_anchor
-        close_cols = [col for col in candles_anchor.columns if col.startswith("close_")]
-
-        if len(close_cols) < 2:
-            raise ValueError("Anchor data must include at least two close price columns for BTC and ETH.")
-
-        close_btc_col = [col for col in close_cols if "BTC" in col][0]
-        close_eth_col = [col for col in close_cols if "ETH" in col][0]
-
         df = pd.merge(
             candles_target[['timestamp', 'close']],
-            candles_anchor[['timestamp', close_btc_col, close_eth_col]],
+            candles_anchor[['timestamp', 'close_BTC', 'close_ETH']],
             on='timestamp',
             how='inner'
         )
 
-        # Rename for consistency
-        df = df.rename(columns={
-            close_btc_col: 'close_BTC',
-            close_eth_col: 'close_ETH'
-        })
-
-        # Compute returns from 4 hours ago
-        df['btc_return_4h_ago'] = df['close_BTC'].pct_change().shift(4)
-        df['eth_return_4h_ago'] = df['close_ETH'].pct_change().shift(4)
+        # Compute returns
+        df['btc_return_1h'] = df['close_BTC'].pct_change()
+        df['eth_return_1h'] = df['close_ETH'].pct_change()
+        df['ldo_return_1h'] = df['close'].pct_change()
+        df['btc_return_2h'] = df['close_BTC'].pct_change(2)
+        df['eth_return_2h'] = df['close_ETH'].pct_change(2)
 
         signals = []
         for i in range(len(df)):
-            btc_pump = df['btc_return_4h_ago'].iloc[i] > 0.02
-            eth_pump = df['eth_return_4h_ago'].iloc[i] > 0.02
-            signals.append('BUY' if btc_pump or eth_pump else 'HOLD')
+            if i < 4:
+                signals.append('HOLD')
+                continue
+
+            # BUY conditions
+            btc_pump = df['btc_return_1h'].iloc[i-4:i].gt(0.02).any()
+            eth_pump = df['eth_return_1h'].iloc[i-4:i].gt(0.02).any()
+
+            # SELL conditions
+            ldo_drop = df['ldo_return_1h'].iloc[i] < -0.015
+            btc_fall = df['btc_return_2h'].iloc[i] < 0
+            eth_fall = df['eth_return_2h'].iloc[i] < 0
+
+            if (btc_pump or eth_pump):
+                signals.append('BUY')
+            elif ldo_drop and btc_fall and eth_fall:
+                signals.append('SELL')
+            else:
+                signals.append('HOLD')
 
         df['signal'] = signals
         return df[['timestamp', 'signal']]
@@ -51,7 +52,11 @@ def generate_signals(candles_target: pd.DataFrame, candles_anchor: pd.DataFrame)
         raise RuntimeError(f"Error in generate_signals: {e}")
 
 
+
 def get_coin_metadata() -> dict:
+    """
+    Specifies the target and anchor coins used in this strategy.
+    """
     return {
         "target": {
             "symbol": "LDO",
